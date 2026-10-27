@@ -12,7 +12,6 @@ from datetime import datetime
 import plotly.express as px
 import re
 
-
 DEFAULT_BRAIN = {
     "texts": [],
     "embeddings": [],
@@ -34,7 +33,6 @@ st.set_page_config(
 )
 
 
-# Custom CSS for stunning UI
 st.markdown(
     """
     <style>
@@ -106,11 +104,24 @@ st.markdown(
         font-weight: 700;
     }
 
-    .stTextInput>div>div>input {
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        color: #e8eaf6;
-        border-radius: 10px;
+    .stTextInput > div > div > input,
+    .stTextArea > div > div > textarea,
+    .stSelectbox > div > div > select {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        background: rgba(255, 255, 255, 0.05) !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    }
+
+    .stTextInput label,
+    .stTextArea label,
+    .stSelectbox label {
+        color: #ffffff !important;
+    }
+
+    .stTextInput input::placeholder,
+    .stTextArea textarea::placeholder {
+        color: rgba(255, 255, 255, 0.6) !important;
     }
 
     .stExpander {
@@ -159,7 +170,6 @@ def normalize_brain_data(data):
     normalized["timestamps"] = timestamps[: len(texts)]
     normalized["tags"] = tags[: len(texts)]
     normalized["embeddings"] = embeddings[: len(texts)]
-
     return normalized
 
 
@@ -222,6 +232,124 @@ def format_timestamp_for_display(value):
         return str(value)[:19] if isinstance(value, str) else "N/A"
 
 
+def normalize_text_for_matching(text):
+    """Normalize text for simpler keyword matching and summarization."""
+    if not text:
+        return ""
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def split_into_sentences(text):
+    """Split text into sentences."""
+    if not text:
+        return []
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
+def summarize_text(text, max_sentences=3):
+    """Create a concise summary from document content."""
+    if not text or not text.strip():
+        return "No content available to summarize."
+
+    sentences = split_into_sentences(text)
+    if not sentences:
+        return text.strip()[:500]
+
+    if len(sentences) <= max_sentences:
+        return " ".join(sentences)
+
+    keyword_tokens = set(normalize_text_for_matching(text).split())
+    scored = []
+    for sentence in sentences:
+        s_norm = normalize_text_for_matching(sentence)
+        if not s_norm:
+            continue
+        overlap = len(set(s_norm.split()) & keyword_tokens)
+        score = overlap + len(sentence.split()) * 0.02
+        scored.append((score, sentence))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected = [sentence for _, sentence in scored[:max_sentences]]
+    return " ".join(selected)
+
+
+def build_answer_from_results(question, results):
+    """Answer a question using the best relevant document chunks."""
+    if not results:
+        return "I couldn't find relevant information in your documents."
+
+    question_lower = question.lower()
+
+    if any(word in question_lower for word in [
+        "summarize", "summary", "overview", "what is this document about",
+        "tell me about", "briefly explain"
+    ]):
+        combined = "\n\n".join(r["text"] for r in results[:5])
+        return summarize_text(combined, max_sentences=3)
+
+    context = "\n\n".join(r["text"] for r in results[:3])
+    q_tokens = set(normalize_text_for_matching(question).split())
+    best_sentence = ""
+    best_score = -1
+
+    for sentence in split_into_sentences(context):
+        s_tokens = set(normalize_text_for_matching(sentence).split())
+        score = len(q_tokens & s_tokens)
+        if score > best_score:
+            best_score = score
+            best_sentence = sentence
+
+    if not best_sentence:
+        return summarize_text(context, max_sentences=2)
+
+    return best_sentence
+
+
+def ensure_embeddings(brain, model):
+    """Rebuild embeddings when stored brain data has mismatched or missing embedding vectors."""
+    if model is None:
+        return False
+    texts = brain.data.get("texts") or []
+    if not texts:
+        return True
+
+    embeddings = brain.data.get("embeddings") or []
+    if len(embeddings) == len(texts):
+        valid = True
+        for idx, emb in enumerate(embeddings):
+            try:
+                arr = np.asarray(emb, dtype=float)
+                if arr.size == 0:
+                    valid = False
+                    break
+            except Exception:
+                valid = False
+                break
+        if valid:
+            return True
+
+    rebuilt = []
+    for idx, text in enumerate(texts):
+        if not isinstance(text, str) or not text.strip():
+            rebuilt.append(np.zeros(384, dtype=float))
+            continue
+        existing = embeddings[idx] if idx < len(embeddings) else None
+        try:
+            arr = np.asarray(existing, dtype=float)
+            if arr.size > 0:
+                rebuilt.append(arr)
+            else:
+                rebuilt.append(np.asarray(model.encode([text])[0], dtype=float))
+        except Exception:
+            rebuilt.append(np.asarray(model.encode([text])[0], dtype=float))
+
+    brain.data["embeddings"] = rebuilt
+    brain.save()
+    return True
+
+
 # ==========================================
 # 2. DATABASE MANAGEMENT
 # ==========================================
@@ -253,7 +381,10 @@ class KnowledgeBrain:
         self.save()
 
     def add_embeddings(self, embeddings):
-        self.data["embeddings"].extend(embeddings.tolist())
+        if isinstance(embeddings, np.ndarray):
+            self.data["embeddings"].extend(embeddings.tolist())
+        else:
+            self.data["embeddings"].extend(list(embeddings))
         self.save()
 
     def get_stats(self):
@@ -292,7 +423,7 @@ def load_embedding_model():
 # 4. DOCUMENT PROCESSING
 # ==========================================
 def extract_text_from_pdf(file_path):
-    """Extract text from PDF files"""
+    """Extract text from PDF files."""
     try:
         reader = PdfReader(file_path)
         text = ""
@@ -306,7 +437,7 @@ def extract_text_from_pdf(file_path):
 
 
 def extract_text_from_docx(file_path):
-    """Extract text from Word documents"""
+    """Extract text from Word documents."""
     try:
         doc = Document(file_path)
         text = ""
@@ -318,19 +449,8 @@ def extract_text_from_docx(file_path):
         return ""
 
 
-def chunk_text(text, chunk_size=500, overlap=50):
-    """Split text into overlapping chunks for better context"""
-    words = text.split()
-    chunks = []
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = " ".join(words[i : i + chunk_size])
-        if chunk:
-            chunks.append(chunk)
-    return chunks
-
-
 def smart_chunk_text(text, chunk_size=500):
-    """Intelligent chunking that respects paragraph boundaries"""
+    """Intelligent chunking that respects paragraph boundaries."""
     if not text or not text.strip():
         return []
 
@@ -360,16 +480,20 @@ def smart_chunk_text(text, chunk_size=500):
 # 5. SEARCH & RETRIEVAL
 # ==========================================
 def semantic_search(query, brain, model, top_k=5):
-    """Perform semantic search using embeddings"""
+    """Perform semantic search using embeddings."""
     if not query or len(brain.data["texts"]) == 0:
         return [], []
 
+    if model is not None:
+        ensure_embeddings(brain, model)
     if not brain.data.get("embeddings") or len(brain.data["embeddings"]) != len(brain.data["texts"]):
         return [], []
 
     try:
-        query_embedding = model.encode([query])
-        similarities = cosine_similarity(query_embedding, np.array(brain.data["embeddings"]))[0]
+        query_embedding = model.encode([query]) if model is not None else None
+        if query_embedding is None:
+            return [], []
+        similarities = cosine_similarity(query_embedding, np.asarray(brain.data["embeddings"]))[0]
         top_indices = np.argsort(similarities)[-top_k:][::-1]
     except Exception:
         return [], []
@@ -377,6 +501,8 @@ def semantic_search(query, brain, model, top_k=5):
     results = []
     scores = []
     for idx in top_indices:
+        if idx >= len(brain.data["texts"]):
+            continue
         results.append(
             {
                 "text": brain.data["texts"][idx],
@@ -392,15 +518,15 @@ def semantic_search(query, brain, model, top_k=5):
 
 
 def keyword_search(query, brain, top_k=5):
-    """Fallback keyword-based search using TF-IDF"""
+    """Fallback keyword-based search using TF-IDF."""
     if not query or len(brain.data["texts"]) == 0:
         return [], []
 
-    try:
-        texts = [text for text in brain.data["texts"] if isinstance(text, str)]
-        if not texts:
-            return [], []
+    texts = [text for text in brain.data["texts"] if isinstance(text, str)]
+    if not texts:
+        return [], []
 
+    try:
         vectorizer = TfidfVectorizer()
         tfidf_matrix = vectorizer.fit_transform(texts)
         query_vec = vectorizer.transform([query])
@@ -412,23 +538,34 @@ def keyword_search(query, brain, top_k=5):
     results = []
     scores = []
     for idx in top_indices:
-        actual_index = idx
+        if idx >= len(texts):
+            continue
+
+        actual_index = None
+        for i, text in enumerate(brain.data["texts"]):
+            if isinstance(text, str) and text == texts[idx]:
+                actual_index = i
+                break
+
+        if actual_index is None:
+            continue
+
         results.append(
             {
                 "text": brain.data["texts"][actual_index],
                 "source": brain.data["sources"][actual_index],
                 "timestamp": brain.data["timestamps"][actual_index],
                 "tags": brain.data["tags"][actual_index],
-                "score": float(similarities[actual_index]),
+                "score": float(similarities[idx]),
             }
         )
-        scores.append(float(similarities[actual_index]))
+        scores.append(float(similarities[idx]))
 
     return results, scores
 
 
 def hybrid_search(query, brain, model, top_k=5, semantic_weight=0.7):
-    """Combine semantic and keyword search for best results"""
+    """Combine semantic and keyword search for best results."""
     if not query:
         return [], []
 
@@ -472,7 +609,6 @@ def hybrid_search(query, brain, model, top_k=5, semantic_weight=0.7):
 # 6. MAIN APPLICATION
 # ==========================================
 def main():
-    # Header
     st.markdown(
         """
         <div class="main-header">
@@ -485,7 +621,6 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # Sidebar - Brain Management
     with st.sidebar:
         st.header("🧠 Knowledge Brains")
 
@@ -518,8 +653,8 @@ def main():
             if uploaded_files:
                 model = load_embedding_model()
                 if model is None:
-                    st.error("Failed to load AI model")
-                    return
+                    st.error("Failed to load AI model. Semantic search may be unavailable, but keyword search still works.")
+                    model = None
 
                 with st.spinner("Processing documents..."):
                     total_chunks = 0
@@ -547,10 +682,11 @@ def main():
 
                         for chunk in chunks:
                             brain.add_chunk(chunk, file.name, tags)
-                            embedding = model.encode([chunk])
-                            all_embeddings.append(embedding[0])
+                            if model is not None:
+                                embedding = model.encode([chunk])
+                                all_embeddings.append(embedding[0])
 
-                        if all_embeddings:
+                        if model is not None and all_embeddings:
                             brain.add_embeddings(np.array(all_embeddings))
 
                         total_chunks += len(chunks)
@@ -578,7 +714,6 @@ def main():
         st.divider()
         st.caption("🔒 100% Local | No Cloud | No API | Your Privacy Guaranteed")
 
-    # Main Content Area
     tab1, tab2, tab3, tab4 = st.tabs(["🔍 Search", "💬 Chat", "📈 Analytics", "⚙️ Settings"])
 
     with tab1:
@@ -602,9 +737,6 @@ def main():
             else:
                 brain.data = normalize_brain_data(brain.data)
                 model = load_embedding_model()
-                if model is None:
-                    st.error("Failed to load AI model")
-                    return
 
                 with st.spinner("Searching..."):
                     if search_mode == "Semantic":
@@ -617,14 +749,15 @@ def main():
                 if results:
                     st.success(f"Found {len(results)} relevant results")
 
+                    summary = summarize_text("\n\n".join(r["text"] for r in results[:5]), max_sentences=3)
+                    st.markdown(f"**Document Summary:** {summary}")
+
                     for i, result in enumerate(results, 1):
                         with st.expander(f"📄 Result {i} (Score: {result['score']:.3f}) - {result['source']}"):
                             st.markdown(f"**Source:** {result['source']}")
                             st.markdown(f"**Time:** {format_timestamp_for_display(result['timestamp'])}")
-
                             if result["tags"]:
                                 st.markdown("**Tags:** " + " ".join([f"`{tag}`" for tag in result["tags"]]))
-
                             st.markdown("---")
                             st.write(result["text"])
                 else:
@@ -661,9 +794,6 @@ def main():
             else:
                 brain.data = normalize_brain_data(brain.data)
                 model = load_embedding_model()
-                if model is None:
-                    st.error("Failed to load AI model")
-                    return
 
                 st.session_state.chat_history.append({"role": "user", "content": user_query})
 
@@ -671,11 +801,7 @@ def main():
                     results, scores = hybrid_search(user_query, brain, model, top_k=5)
 
                     if results:
-                        context = "\n\n".join([f"[{r['source']}] {r['text']}" for r in results[:3]])
-                        response = (
-                            f"Based on your documents, here's what I found:\n\n{context}\n\n"
-                            f"**Relevance Scores:** {', '.join([f'{s:.3f}' for s in scores[:3]])}"
-                        )
+                        response = build_answer_from_results(user_query, results)
                     else:
                         response = "I couldn't find relevant information in your documents. Try rephrasing your question or uploading more documents."
 
