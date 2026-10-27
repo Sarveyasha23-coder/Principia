@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.pdf
+*.docx
+.env
+.streamlit/
+.DS_Store
