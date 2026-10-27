@@ -146,6 +146,29 @@ def build_ingestion_timeline(raw_timestamps):
     return timeline.sort_values("date").reset_index(drop=True)
 
 
+def format_timestamp_for_display(value):
+    """Safely convert timestamps to display strings without crashing on bad data."""
+    if value is None or value == "" or value == "NaT":
+        return "N/A"
+
+    try:
+        if isinstance(value, pd.Timestamp):
+            return value.isoformat(timespec="seconds")
+        if isinstance(value, datetime):
+            return value.isoformat(timespec="seconds")
+        if isinstance(value, str):
+            parsed = pd.to_datetime(value, errors="coerce")
+            if pd.isna(parsed):
+                return "N/A"
+            return pd.Timestamp(parsed).isoformat(timespec="seconds")
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return "N/A"
+        return pd.Timestamp(parsed).isoformat(timespec="seconds")
+    except Exception:
+        return str(value)[:19] if isinstance(value, str) else "N/A"
+
+
 # ==========================================
 # 2. DATABASE MANAGEMENT
 # ==========================================
@@ -184,11 +207,24 @@ class KnowledgeBrain:
         self.save()
     
     def get_stats(self):
+        valid_timestamps = [ts for ts in self.data.get("timestamps", []) if ts not in (None, "", "NaT")]
+        if valid_timestamps:
+            try:
+                parsed = pd.to_datetime(valid_timestamps, errors="coerce").dropna()
+                if not parsed.empty:
+                    created = parsed.min().isoformat()
+                else:
+                    created = "N/A"
+            except Exception:
+                created = "N/A"
+        else:
+            created = "N/A"
+
         return {
             "total_chunks": len(self.data["texts"]),
             "total_docs": len(set(self.data["sources"])),
             "total_tags": len(set([tag for tags in self.data["tags"] for tag in tags])),
-            "created": min(self.data["timestamps"]) if self.data["timestamps"] else "N/A"
+            "created": created
         }
 
 # ==========================================
@@ -499,7 +535,7 @@ def main():
                     for i, result in enumerate(results, 1):
                         with st.expander(f"📄 Result {i} (Score: {result['score']:.3f}) - {result['source']}"):
                             st.markdown(f"**Source:** {result['source']}")
-                            st.markdown(f"**Time:** {result['timestamp'][:19]}")
+                            st.markdown(f"**Time:** {format_timestamp_for_display(result['timestamp'])}")
                             
                             if result['tags']:
                                 st.markdown("**Tags:** " + " ".join([f"`{tag}`" for tag in result['tags']]))
