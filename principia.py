@@ -1,16 +1,19 @@
 import os
-import streamlit as st
+import json
+import pickle
+import re
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
-from pypdf import PdfReader
-from docx import Document
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction.text import TfidfVectorizer
-import pickle
-from datetime import datetime
 import plotly.express as px
-import re
+import streamlit as st
+from docx import Document
+from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
 
 DEFAULT_BRAIN = {
     "texts": [],
@@ -22,11 +25,11 @@ DEFAULT_BRAIN = {
 }
 
 
-# ==========================================
-# 1. CONFIGURATION & INITIALIZATION
-# ==========================================
+# ===========================================================
+# App configuration
+# ===========================================================
 st.set_page_config(
-    page_title="Principia 2.0 | Ultimate Local Knowledge Engine",
+    page_title="Principia",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -39,95 +42,65 @@ st.markdown(
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
 
     .stApp {
-        background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
-        color: #e8eaf6;
+        background: linear-gradient(135deg, #0b1022 0%, #161d33 100%);
+        color: white;
         font-family: 'Inter', sans-serif;
     }
 
     .main-header {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 15px;
-        margin-bottom: 2rem;
-        box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+        background: linear-gradient(90deg, #4f46e5 0%, #8b5cf6 100%);
+        padding: 1.6rem 1.5rem;
+        border-radius: 16px;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 10px 30px rgba(79, 70, 229, 0.3);
     }
 
     .metric-card {
-        background: rgba(255, 255, 255, 0.05);
-        padding: 1.5rem;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
         border-radius: 12px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        backdrop-filter: blur(10px);
-        transition: transform 0.3s ease;
-    }
-
-    .metric-card:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 8px 20px rgba(102, 126, 234, 0.2);
-    }
-
-    .stButton>button {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border-radius: 10px;
-        padding: 12px 30px;
-        font-weight: 600;
-        border: none;
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-        transition: all 0.3s ease;
-    }
-
-    .stButton>button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        padding: 1rem;
     }
 
     .chat-message {
-        padding: 1rem;
+        background: rgba(255,255,255,0.04);
+        border-left: 3px solid #8b5cf6;
         border-radius: 10px;
+        padding: 0.9rem 1rem;
         margin: 0.5rem 0;
-        background: rgba(255, 255, 255, 0.05);
-        border-left: 3px solid #667eea;
     }
 
-    .source-tag {
-        display: inline-block;
-        background: rgba(102, 126, 234, 0.2);
-        padding: 0.3rem 0.8rem;
-        border-radius: 15px;
-        font-size: 0.85rem;
-        margin: 0.2rem;
+    .stButton>button {
+        background: linear-gradient(90deg, #4f46e5 0%, #8b5cf6 100%);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        padding: 0.55rem 1.1rem;
+        font-weight: 600;
     }
 
-    h1, h2, h3 {
-        color: #ffffff;
-        font-weight: 700;
+    .stButton>button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35);
     }
 
     .stTextInput > div > div > input,
     .stTextArea > div > div > textarea,
     .stSelectbox > div > div > select {
-        color: #ffffff !important;
-        -webkit-text-fill-color: #ffffff !important;
-        background: rgba(255, 255, 255, 0.05) !important;
-        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+        background: rgba(255,255,255,0.05);
+        color: white !important;
+        border: 1px solid rgba(255,255,255,0.08);
     }
 
     .stTextInput label,
     .stTextArea label,
     .stSelectbox label {
-        color: #ffffff !important;
+        color: white !important;
     }
 
     .stTextInput input::placeholder,
     .stTextArea textarea::placeholder {
-        color: rgba(255, 255, 255, 0.6) !important;
-    }
-
-    .stExpander {
-        background: rgba(255, 255, 255, 0.03);
-        border-radius: 10px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: rgba(255,255,255,0.6) !important;
     }
     </style>
     """,
@@ -135,8 +108,14 @@ st.markdown(
 )
 
 
+# ===========================================================
+# Data normalization and timestamp safety
+# ===========================================================
 def normalize_brain_data(data):
-    """Repair a brain dict so all required lists stay aligned and valid."""
+    """
+    Repair a saved brain dictionary so text, sources, timestamps, tags, and embeddings
+    stay aligned and valid, even if older pickles are partially broken.
+    """
     if not isinstance(data, dict):
         return DEFAULT_BRAIN.copy()
 
@@ -149,32 +128,45 @@ def normalize_brain_data(data):
     tags = list(normalized.get("tags") or [])
     embeddings = list(normalized.get("embeddings") or [])
 
+    # Coerce common weird cases
+    texts = [str(x) if x is not None else "" for x in texts]
+    sources = [str(x) if x is not None else "unknown" for x in sources]
+    timestamps = [x for x in timestamps]
+    tags = [list(x) if isinstance(x, (list, tuple, set)) else [str(x)] if x not in (None, "") else [] for x in tags]
+
     target_len = max(len(texts), len(sources), len(timestamps), len(tags))
 
+    if len(texts) < target_len:
+        texts.extend([""] * (target_len - len(texts)))
     if len(sources) < target_len:
         sources.extend(["unknown"] * (target_len - len(sources)))
     if len(timestamps) < target_len:
         timestamps.extend([None] * (target_len - len(timestamps)))
     if len(tags) < target_len:
         tags.extend([[] for _ in range(target_len - len(tags))])
-    if len(texts) < target_len:
-        texts.extend([""] * (target_len - len(texts)))
 
     if len(embeddings) > len(texts):
         embeddings = embeddings[: len(texts)]
     if len(embeddings) < len(texts):
-        embeddings.extend([np.array([])] * (len(texts) - len(embeddings)))
+        embeddings.extend([np.array([], dtype=float)] * (len(texts) - len(embeddings)))
 
-    normalized["texts"] = texts
-    normalized["sources"] = sources[: len(texts)]
-    normalized["timestamps"] = timestamps[: len(texts)]
-    normalized["tags"] = tags[: len(texts)]
-    normalized["embeddings"] = embeddings[: len(texts)]
+    normalized["texts"] = texts[:target_len]
+    normalized["sources"] = sources[:target_len]
+    normalized["timestamps"] = timestamps[:target_len]
+    normalized["tags"] = tags[:target_len]
+    normalized["embeddings"] = embeddings[:target_len]
     return normalized
 
 
 def coerce_datetime_series(values):
-    """Normalize timestamp-like values from persisted brain data into a pandas Series."""
+    """
+    Convert timestamp-like values to a pandas datetime series while tolerating:
+    - empty data
+    - None/NaT
+    - mixed string formats
+    - invalid values
+    - dates in different formats
+    """
     if values is None:
         return pd.Series([], dtype="datetime64[ns]")
 
@@ -195,14 +187,21 @@ def coerce_datetime_series(values):
 
 
 def build_ingestion_timeline(raw_timestamps):
-    """Build a date-based ingestion timeline while tolerating invalid or missing data."""
+    """
+    Build a date-based ingestion timeline without crashing on invalid or mixed data.
+    This is the exact fix for the `.dt.date` AttributeError.
+    """
     timestamps = coerce_datetime_series(raw_timestamps)
     if timestamps.empty:
-        return pd.DataFrame({"date": pd.Series([], dtype="datetime64[ns]"), "count": pd.Series([], dtype="int64")})
+        return pd.DataFrame(
+            {"date": pd.Series([], dtype="datetime64[ns]"), "count": pd.Series([], dtype="int64")}
+        )
 
     timeline = pd.DataFrame({"date": timestamps.dt.date, "count": 1}).dropna(subset=["date"])
     if timeline.empty:
-        return pd.DataFrame({"date": pd.Series([], dtype="datetime64[ns]"), "count": pd.Series([], dtype="int64")})
+        return pd.DataFrame(
+            {"date": pd.Series([], dtype="datetime64[ns]"), "count": pd.Series([], dtype="int64")}
+        )
 
     timeline = timeline.groupby("date", as_index=False).size().rename(columns={"size": "count"})
     timeline["date"] = pd.to_datetime(timeline["date"])
@@ -210,7 +209,9 @@ def build_ingestion_timeline(raw_timestamps):
 
 
 def format_timestamp_for_display(value):
-    """Safely convert timestamps to display strings without crashing on bad data."""
+    """
+    Format timestamps for UI display, while safely handling None / invalid string / mixed data.
+    """
     if value is None or value == "" or value == "NaT":
         return "N/A"
 
@@ -233,23 +234,21 @@ def format_timestamp_for_display(value):
 
 
 def normalize_text_for_matching(text):
-    """Normalize text for simpler keyword matching and summarization."""
     if not text:
         return ""
     text = text.lower()
     text = re.sub(r"[^a-z0-9\s]", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def split_into_sentences(text):
-    """Split text into sentences."""
-    if not text:
+    if not text or not text.strip():
         return []
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
 
 
 def summarize_text(text, max_sentences=3):
-    """Create a concise summary from document content."""
     if not text or not text.strip():
         return "No content available to summarize."
 
@@ -262,6 +261,7 @@ def summarize_text(text, max_sentences=3):
 
     keyword_tokens = set(normalize_text_for_matching(text).split())
     scored = []
+
     for sentence in sentences:
         s_norm = normalize_text_for_matching(sentence)
         if not s_norm:
@@ -276,15 +276,18 @@ def summarize_text(text, max_sentences=3):
 
 
 def build_answer_from_results(question, results):
-    """Answer a question using the best relevant document chunks."""
     if not results:
         return "I couldn't find relevant information in your documents."
 
     question_lower = question.lower()
 
     if any(word in question_lower for word in [
-        "summarize", "summary", "overview", "what is this document about",
-        "tell me about", "briefly explain"
+        "summarize",
+        "summary",
+        "overview",
+        "what is this document about",
+        "tell me about",
+        "briefly explain",
     ]):
         combined = "\n\n".join(r["text"] for r in results[:5])
         return summarize_text(combined, max_sentences=3)
@@ -307,52 +310,9 @@ def build_answer_from_results(question, results):
     return best_sentence
 
 
-def ensure_embeddings(brain, model):
-    """Rebuild embeddings when stored brain data has mismatched or missing embedding vectors."""
-    if model is None:
-        return False
-    texts = brain.data.get("texts") or []
-    if not texts:
-        return True
-
-    embeddings = brain.data.get("embeddings") or []
-    if len(embeddings) == len(texts):
-        valid = True
-        for idx, emb in enumerate(embeddings):
-            try:
-                arr = np.asarray(emb, dtype=float)
-                if arr.size == 0:
-                    valid = False
-                    break
-            except Exception:
-                valid = False
-                break
-        if valid:
-            return True
-
-    rebuilt = []
-    for idx, text in enumerate(texts):
-        if not isinstance(text, str) or not text.strip():
-            rebuilt.append(np.zeros(384, dtype=float))
-            continue
-        existing = embeddings[idx] if idx < len(embeddings) else None
-        try:
-            arr = np.asarray(existing, dtype=float)
-            if arr.size > 0:
-                rebuilt.append(arr)
-            else:
-                rebuilt.append(np.asarray(model.encode([text])[0], dtype=float))
-        except Exception:
-            rebuilt.append(np.asarray(model.encode([text])[0], dtype=float))
-
-    brain.data["embeddings"] = rebuilt
-    brain.save()
-    return True
-
-
-# ==========================================
-# 2. DATABASE MANAGEMENT
-# ==========================================
+# ===========================================================
+# Brain storage
+# ===========================================================
 class KnowledgeBrain:
     def __init__(self, brain_name="default"):
         self.brain_name = brain_name
@@ -390,6 +350,7 @@ class KnowledgeBrain:
     def get_stats(self):
         valid_timestamps = [ts for ts in self.data.get("timestamps", []) if ts not in (None, "", "NaT")]
         created = "N/A"
+
         if valid_timestamps:
             try:
                 parsed = pd.to_datetime(valid_timestamps, errors="coerce").dropna()
@@ -401,35 +362,82 @@ class KnowledgeBrain:
         return {
             "total_chunks": len(self.data.get("texts", [])),
             "total_docs": len(set(self.data.get("sources", []))),
-            "total_tags": len(set(tag for tags in self.data.get("tags", []) for tag in tags)),
+            "total_tags": len(set(tag for tag_list in self.data.get("tags", []) for tag in tag_list)),
             "created": created,
         }
 
 
-# ==========================================
-# 3. AI MODEL LOADING
-# ==========================================
+def ensure_embeddings(brain, model):
+    """
+    Rebuild embeddings when the saved brain has mismatched or incomplete embedding vectors.
+    """
+    if model is None:
+        return False
+
+    texts = brain.data.get("texts") or []
+    if not texts:
+        return True
+
+    embeddings = brain.data.get("embeddings") or []
+    valid_count = len(embeddings)
+
+    if len(embeddings) == len(texts):
+        valid = True
+        for emb in embeddings:
+            try:
+                arr = np.asarray(emb, dtype=float)
+                if arr.size == 0:
+                    valid = False
+                    break
+            except Exception:
+                valid = False
+                break
+        if valid:
+            return True
+
+    rebuilt = []
+    for i, text in enumerate(texts):
+        if not isinstance(text, str) or not text.strip():
+            rebuilt.append(np.zeros(384, dtype=float))
+            continue
+
+        existing = embeddings[i] if i < valid_count else None
+        try:
+            arr = np.asarray(existing, dtype=float)
+            if arr.size > 0:
+                rebuilt.append(arr)
+            else:
+                rebuilt.append(np.asarray(model.encode([text])[0], dtype=float))
+        except Exception:
+            rebuilt.append(np.asarray(model.encode([text])[0], dtype=float))
+
+    brain.data["embeddings"] = rebuilt
+    brain.save()
+    return True
+
+
+# ===========================================================
+# Model loading
+# ===========================================================
 @st.cache_resource
 def load_embedding_model():
-    """Load the local embedding model (downloads once, then 100% offline)"""
     try:
         return SentenceTransformer("all-MiniLM-L6-v2")
     except Exception as e:
-        st.error(f"Error loading model: {e}")
+        st.error(f"Unable to load sentence-transformer model: {e}")
         return None
 
 
-# ==========================================
-# 4. DOCUMENT PROCESSING
-# ==========================================
+# ===========================================================
+# Document ingestion
+# ===========================================================
 def extract_text_from_pdf(file_path):
-    """Extract text from PDF files."""
     try:
         reader = PdfReader(file_path)
         text = ""
         for page in reader.pages:
-            extracted = page.extract_text()
-            text += (extracted or "") + "\n"
+            page_text = page.extract_text() or ""
+            text += page_text + "\n"
         return text
     except Exception as e:
         st.error(f"Error reading PDF: {e}")
@@ -437,12 +445,11 @@ def extract_text_from_pdf(file_path):
 
 
 def extract_text_from_docx(file_path):
-    """Extract text from Word documents."""
     try:
         doc = Document(file_path)
         text = ""
-        for para in doc.paragraphs:
-            text += para.text + "\n"
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
         return text
     except Exception as e:
         st.error(f"Error reading DOCX: {e}")
@@ -450,7 +457,6 @@ def extract_text_from_docx(file_path):
 
 
 def smart_chunk_text(text, chunk_size=500):
-    """Intelligent chunking that respects paragraph boundaries."""
     if not text or not text.strip():
         return []
 
@@ -460,10 +466,11 @@ def smart_chunk_text(text, chunk_size=500):
     current_length = 0
 
     for para in paragraphs:
-        para_length = len(para.split())
-        if current_length + para_length > chunk_size:
-            if current_chunk:
-                chunks.append("\n\n".join(current_chunk))
+        para_words = para.split()
+        para_length = len(para_words)
+
+        if current_length + para_length > chunk_size and current_chunk:
+            chunks.append("\n\n".join(current_chunk))
             current_chunk = [para]
             current_length = para_length
         else:
@@ -476,16 +483,14 @@ def smart_chunk_text(text, chunk_size=500):
     return chunks
 
 
-# ==========================================
-# 5. SEARCH & RETRIEVAL
-# ==========================================
+# ===========================================================
+# Search and retrieval
+# ===========================================================
 def semantic_search(query, brain, model, top_k=5):
-    """Perform semantic search using embeddings."""
     if not query or len(brain.data["texts"]) == 0:
         return [], []
 
-    if model is not None:
-        ensure_embeddings(brain, model)
+    ensure_embeddings(brain, model)
     if not brain.data.get("embeddings") or len(brain.data["embeddings"]) != len(brain.data["texts"]):
         return [], []
 
@@ -499,73 +504,65 @@ def semantic_search(query, brain, model, top_k=5):
         return [], []
 
     results = []
-    scores = []
     for idx in top_indices:
         if idx >= len(brain.data["texts"]):
             continue
-        results.append(
-            {
-                "text": brain.data["texts"][idx],
-                "source": brain.data["sources"][idx],
-                "timestamp": brain.data["timestamps"][idx],
-                "tags": brain.data["tags"][idx],
-                "score": float(similarities[idx]),
-            }
-        )
-        scores.append(float(similarities[idx]))
-
-    return results, scores
+        results.append({
+            "text": brain.data["texts"][idx],
+            "source": brain.data["sources"][idx],
+            "timestamp": brain.data["timestamps"][idx],
+            "tags": brain.data["tags"][idx],
+            "score": float(similarities[idx]),
+        })
+    return results, [float(similarities[i]) for i in top_indices if i < len(brain.data["texts"])]
 
 
 def keyword_search(query, brain, top_k=5):
-    """Fallback keyword-based search using TF-IDF."""
     if not query or len(brain.data["texts"]) == 0:
         return [], []
 
-    texts = [text for text in brain.data["texts"] if isinstance(text, str)]
-    if not texts:
+    valid_texts = [text for text in brain.data["texts"] if isinstance(text, str)]
+    if not valid_texts:
         return [], []
 
     try:
         vectorizer = TfidfVectorizer()
-        tfidf_matrix = vectorizer.fit_transform(texts)
+        matrix = vectorizer.fit_transform(valid_texts)
         query_vec = vectorizer.transform([query])
-        similarities = cosine_similarity(query_vec, tfidf_matrix)[0]
+        similarities = cosine_similarity(query_vec, matrix)[0]
         top_indices = np.argsort(similarities)[-top_k:][::-1]
     except Exception:
         return [], []
 
     results = []
     scores = []
+
     for idx in top_indices:
-        if idx >= len(texts):
+        if idx >= len(valid_texts):
             continue
 
         actual_index = None
         for i, text in enumerate(brain.data["texts"]):
-            if isinstance(text, str) and text == texts[idx]:
+            if isinstance(text, str) and text == valid_texts[idx]:
                 actual_index = i
                 break
 
         if actual_index is None:
             continue
 
-        results.append(
-            {
-                "text": brain.data["texts"][actual_index],
-                "source": brain.data["sources"][actual_index],
-                "timestamp": brain.data["timestamps"][actual_index],
-                "tags": brain.data["tags"][actual_index],
-                "score": float(similarities[idx]),
-            }
-        )
+        results.append({
+            "text": brain.data["texts"][actual_index],
+            "source": brain.data["sources"][actual_index],
+            "timestamp": brain.data["timestamps"][actual_index],
+            "tags": brain.data["tags"][actual_index],
+            "score": float(similarities[idx]),
+        })
         scores.append(float(similarities[idx]))
 
     return results, scores
 
 
 def hybrid_search(query, brain, model, top_k=5, semantic_weight=0.7):
-    """Combine semantic and keyword search for best results."""
     if not query:
         return [], []
 
@@ -575,7 +572,7 @@ def hybrid_search(query, brain, model, top_k=5, semantic_weight=0.7):
     combined = {}
 
     for i, result in enumerate(semantic_results):
-        key = result["text"][:100]
+        key = result["text"][:120]
         combined[key] = {
             "text": result["text"],
             "source": result["source"],
@@ -585,7 +582,7 @@ def hybrid_search(query, brain, model, top_k=5, semantic_weight=0.7):
         }
 
     for i, result in enumerate(keyword_results):
-        key = result["text"][:100]
+        key = result["text"][:120]
         if key in combined:
             combined[key]["score"] += keyword_scores[i] * (1 - semantic_weight)
         else:
@@ -601,40 +598,42 @@ def hybrid_search(query, brain, model, top_k=5, semantic_weight=0.7):
         return [], []
 
     sorted_results = sorted(combined.values(), key=lambda x: x["score"], reverse=True)[:top_k]
-    scores = [r["score"] for r in sorted_results]
+    scores = [item["score"] for item in sorted_results]
     return sorted_results, scores
 
 
-# ==========================================
-# 6. MAIN APPLICATION
-# ==========================================
+# ===========================================================
+# Main app
+# ===========================================================
 def main():
     st.markdown(
         """
         <div class="main-header">
-            <h1 style="margin: 0; color: white;">🧠 Principia 2.0</h1>
+            <h1 style="margin: 0; color: white;">🧠 Principia</h1>
             <p style="margin: 0.5rem 0 0 0; color: rgba(255,255,255,0.9);">
-                Ultimate Local Knowledge Engine | 100% Offline | Zero API Calls | Your Data, Your Control
+                Local knowledge engine for PDFs, Word docs, notes, and research material
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    if "brain_options" not in st.session_state:
+        st.session_state.brain_options = ["default", "work", "research", "personal"]
+
     with st.sidebar:
-        st.header("🧠 Knowledge Brains")
+        st.header("🧠 Brain Manager")
 
-        brain_options = ["default", "work", "research", "personal", "custom"]
-        selected_brain = st.selectbox("Select Brain", brain_options)
-
-        if st.button("Create New Brain"):
-            new_brain_name = st.text_input("Brain name:")
-            if new_brain_name:
-                brain_options.append(new_brain_name)
-                selected_brain = new_brain_name
-
+        selected_brain = st.selectbox("Choose Brain", st.session_state.brain_options)
         brain = KnowledgeBrain(selected_brain)
-        brain.data = normalize_brain_data(brain.data)
+
+        new_brain_name = st.text_input("New brain name", placeholder="e.g. legal")
+        if st.button("Create Brain") and new_brain_name.strip():
+            clean_name = new_brain_name.strip()
+            if clean_name not in st.session_state.brain_options:
+                st.session_state.brain_options.append(clean_name)
+                selected_brain = clean_name
+                st.rerun()
 
         st.divider()
         st.header("📥 Ingest Documents")
@@ -643,97 +642,91 @@ def main():
             "Upload files",
             type=["pdf", "txt", "md", "docx"],
             accept_multiple_files=True,
-            help="Supports PDF, TXT, Markdown, and Word documents",
         )
 
-        tags_input = st.text_input("Tags (comma-separated)", placeholder="e.g., important, project-x, 2024")
-        tags = [tag.strip() for tag in tags_input.split(",")] if tags_input else []
+        tags_input = st.text_input("Tags (comma-separated)", placeholder="e.g. research, q4, legal")
+        tags = [tag.strip() for tag in tags_input.split(",") if tag.strip()] if tags_input else []
 
         if st.button("Process & Store"):
-            if uploaded_files:
+            if not uploaded_files:
+                st.warning("Please upload at least one file.")
+            else:
                 model = load_embedding_model()
-                if model is None:
-                    st.error("Failed to load AI model. Semantic search may be unavailable, but keyword search still works.")
-                    model = None
-
                 with st.spinner("Processing documents..."):
-                    total_chunks = 0
-                    progress_bar = st.progress(0)
+                    progress = st.progress(0)
+                    total_files = len(uploaded_files)
 
                     for i, file in enumerate(uploaded_files):
                         temp_path = f"temp_{file.name}"
                         with open(temp_path, "wb") as f:
                             f.write(file.getvalue())
 
-                        if file.name.endswith(".pdf"):
+                        if file.name.lower().endswith(".pdf"):
                             text = extract_text_from_pdf(temp_path)
-                        elif file.name.endswith(".docx"):
+                        elif file.name.lower().endswith(".docx"):
                             text = extract_text_from_docx(temp_path)
                         else:
                             try:
-                                text = file.getvalue().decode("utf-8")
+                                raw = file.getvalue()
+                                text = raw.decode("utf-8")
                             except Exception:
                                 text = file.getvalue().decode("utf-8", errors="ignore")
 
                         os.remove(temp_path)
 
                         chunks = smart_chunk_text(text)
+                        if not chunks:
+                            chunks = [text.strip()] if text.strip() else [""]
+
                         all_embeddings = []
 
                         for chunk in chunks:
+                            if not chunk.strip():
+                                continue
                             brain.add_chunk(chunk, file.name, tags)
                             if model is not None:
-                                embedding = model.encode([chunk])
-                                all_embeddings.append(embedding[0])
+                                emb = model.encode([chunk])[0]
+                                all_embeddings.append(emb)
 
                         if model is not None and all_embeddings:
                             brain.add_embeddings(np.array(all_embeddings))
 
-                        total_chunks += len(chunks)
-                        progress_bar.progress((i + 1) / len(uploaded_files))
+                        progress.progress((i + 1) / total_files)
 
                     brain.data = normalize_brain_data(brain.data)
-                    st.success(f"✅ Successfully processed {len(uploaded_files)} files ({total_chunks} chunks)")
+                    st.success(f"Successfully processed {len(uploaded_files)} file(s).")
                     st.balloons()
-            else:
-                st.warning("Please upload at least one file")
+                    st.rerun()
 
         st.divider()
+        st.header("📊 Stats")
 
-        st.header("📊 Brain Statistics")
         stats = brain.get_stats()
-
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Total Chunks", stats["total_chunks"])
-            st.metric("Total Tags", stats["total_tags"])
+            st.metric("Chunks", stats["total_chunks"])
+            st.metric("Docs", stats["total_docs"])
         with col2:
-            st.metric("Documents", stats["total_docs"])
+            st.metric("Tags", stats["total_tags"])
             st.metric("Created", stats["created"][:10] if stats["created"] != "N/A" else "N/A")
 
         st.divider()
-        st.caption("🔒 100% Local | No Cloud | No API | Your Privacy Guaranteed")
+        st.caption("🔒 Local-only. No external API calls.")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["🔍 Search", "💬 Chat", "📈 Analytics", "⚙️ Settings"])
+    # Main tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["🔍 Search", "💬 Chat", "📊 Analytics", "⚙️ Settings"])
 
+    # Search tab
     with tab1:
-        st.header("🔍 Intelligent Search")
-        st.write("Search across all your documents using natural language")
+        st.header("🔍 Search your knowledge")
+        query = st.text_input("Ask a question", placeholder="What is the key finding in the report?")
 
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            query = st.text_input(
-                "What are you looking for?",
-                placeholder="e.g., What did the Q3 report say about revenue growth?",
-                label_visibility="collapsed",
-            )
-        with col2:
-            search_mode = st.selectbox("Search Mode", ["Hybrid (Best)", "Semantic", "Keyword"])
-            top_k = st.slider("Results", 1, 10, 5)
+        search_mode = st.selectbox("Mode", ["Hybrid (Best)", "Semantic", "Keyword"])
+        top_k = st.slider("Results", min_value=1, max_value=10, value=5)
 
-        if st.button("Search") and query:
+        if st.button("Search") and query.strip():
             if len(brain.data["texts"]) == 0:
-                st.warning("Your brain is empty! Upload documents first.")
+                st.warning("Your brain is empty. Upload a document first.")
             else:
                 brain.data = normalize_brain_data(brain.data)
                 model = load_embedding_model()
@@ -747,104 +740,108 @@ def main():
                         results, scores = hybrid_search(query, brain, model, top_k)
 
                 if results:
-                    st.success(f"Found {len(results)} relevant results")
-
                     summary = summarize_text("\n\n".join(r["text"] for r in results[:5]), max_sentences=3)
-                    st.markdown(f"**Document Summary:** {summary}")
+                    st.markdown(f"**Summary:** {summary}")
 
                     for i, result in enumerate(results, 1):
-                        with st.expander(f"📄 Result {i} (Score: {result['score']:.3f}) - {result['source']}"):
-                            st.markdown(f"**Source:** {result['source']}")
+                        with st.expander(f"Result {i} — {result['source']}"):
+                            st.markdown(f"**Source:** `{result['source']}`")
                             st.markdown(f"**Time:** {format_timestamp_for_display(result['timestamp'])}")
                             if result["tags"]:
                                 st.markdown("**Tags:** " + " ".join([f"`{tag}`" for tag in result["tags"]]))
                             st.markdown("---")
                             st.write(result["text"])
                 else:
-                    st.info("No results found. Try different keywords or upload more documents.")
+                    st.info("No relevant results found. Try a broader question or add more documents.")
 
+    # Chat tab
     with tab2:
-        st.header("💬 Knowledge Chat")
-        st.write("Ask questions and get answers from your documents")
-
+        st.header("💬 Ask the knowledge base")
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
 
         for message in st.session_state.chat_history:
+            role = message["role"]
             with st.container():
                 st.markdown(
                     f"""
                     <div class="chat-message">
-                        <strong>{'🧑 You' if message['role'] == 'user' else '🤖 Brain'}:</strong><br>
+                        <strong>{'🧑 You' if role == 'user' else '🤖 Brain'}:</strong><br>
                         {message['content']}
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
 
-        user_query = st.text_input(
-            "Ask a question:",
-            placeholder="e.g., Summarize the key findings from the research papers",
-            label_visibility="collapsed",
-        )
+        user_query = st.text_input("Type a question", placeholder="Summarize the main points...")
 
-        if st.button("Send") and user_query:
+        if st.button("Send") and user_query.strip():
             if len(brain.data["texts"]) == 0:
-                st.warning("Your brain is empty! Upload documents first.")
+                st.warning("Your brain is empty. Upload a document first.")
             else:
                 brain.data = normalize_brain_data(brain.data)
                 model = load_embedding_model()
 
-                st.session_state.chat_history.append({"role": "user", "content": user_query})
+                st.session_state.chat_history.append({"role": "user", "content": user_query.strip()})
 
                 with st.spinner("Thinking..."):
-                    results, scores = hybrid_search(user_query, brain, model, top_k=5)
-
+                    results, scores = hybrid_search(user_query.strip(), brain, model, top_k=5)
                     if results:
-                        response = build_answer_from_results(user_query, results)
+                        answer = build_answer_from_results(user_query.strip(), results)
                     else:
-                        response = "I couldn't find relevant information in your documents. Try rephrasing your question or uploading more documents."
+                        answer = "I couldn't find relevant information in your documents. Try rephrasing the question or upload more documents."
 
-                st.session_state.chat_history.append({"role": "brain", "content": response})
+                st.session_state.chat_history.append({"role": "brain", "content": answer})
                 st.rerun()
 
         if st.button("Clear Chat"):
             st.session_state.chat_history = []
             st.rerun()
 
+    # Analytics tab
     with tab3:
-        st.header("📈 Analytics & Insights")
+        st.header("📊 Analytics")
 
         if len(brain.data["texts"]) == 0:
-            st.info("Upload documents to see analytics")
+            st.info("Upload documents to see analytics.")
         else:
-            st.subheader("Document Sources")
-            sources = pd.Series(brain.data["sources"]).value_counts()
-            fig1 = px.pie(values=sources.values, names=sources.index, title="Documents by Source")
-            st.plotly_chart(fig1, use_container_width=True)
+            st.subheader("Document sources")
+            source_counts = pd.Series(brain.data["sources"]).value_counts()
+            fig_sources = px.pie(values=source_counts.values, names=source_counts.index, title="Documents by Source")
+            st.plotly_chart(fig_sources, use_container_width=True)
 
-            st.subheader("Ingestion Timeline")
+            st.subheader("Ingestion timeline")
             timeline = build_ingestion_timeline(brain.data["timestamps"])
             if timeline.empty:
-                st.info("No valid ingestion timestamps are available yet.")
+                st.info("No valid timestamps available yet.")
             else:
-                fig2 = px.line(timeline, x="date", y="count", title="Documents Added Over Time")
-                st.plotly_chart(fig2, use_container_width=True)
+                fig_timeline = px.line(
+                    timeline,
+                    x="date",
+                    y="count",
+                    title="Documents added over time",
+                )
+                st.plotly_chart(fig_timeline, use_container_width=True)
 
-            if brain.data["tags"]:
-                st.subheader("Tag Distribution")
-                all_tags = [tag for tags in brain.data["tags"] for tag in tags]
+            if any(brain.data["tags"]):
+                st.subheader("Tag distribution")
+                all_tags = [tag for tag_list in brain.data["tags"] for tag in tag_list]
                 if all_tags:
                     tag_counts = pd.Series(all_tags).value_counts().head(20)
-                    fig3 = px.bar(x=tag_counts.values, y=tag_counts.index, orientation="h", title="Top 20 Tags")
-                    st.plotly_chart(fig3, use_container_width=True)
+                    fig_tags = px.bar(
+                        x=tag_counts.values,
+                        y=tag_counts.index,
+                        orientation="h",
+                        title="Top tags",
+                    )
+                    st.plotly_chart(fig_tags, use_container_width=True)
 
+    # Settings tab
     with tab4:
-        st.header("⚙️ Settings & Export")
+        st.header("⚙️ Settings")
 
-        st.subheader("Export Data")
-        if st.button("Export Brain as JSON"):
-            import json
+        st.subheader("Export brain data")
+        if st.button("Export JSON"):
             export_data = {
                 "brain_name": selected_brain,
                 "stats": brain.get_stats(),
@@ -872,22 +869,21 @@ def main():
 
         st.divider()
 
-        st.subheader("Danger Zone")
-        if st.button("🗑️ Clear This Brain", type="secondary"):
-            if st.checkbox("I understand this will delete all data in this brain"):
+        st.subheader("Danger zone")
+        if st.button("Clear this brain", type="secondary"):
+            if st.checkbox("I understand this will delete the current brain data."):
                 brain.data = DEFAULT_BRAIN.copy()
                 brain.save()
-                st.success("Brain cleared successfully")
+                st.success("Brain cleared.")
                 st.rerun()
 
         st.divider()
         st.info(
             """
-            **About Principia 2.0**
-            - 100% offline operation
-            - Zero API calls
-            - Your data never leaves your machine
-            - Open source and privacy-first
+            **Notes**
+            - This app stores data locally in a pickle file.
+            - Search and chat are based on the uploaded content in the local brain.
+            - No external API or cloud processing is required.
             """
         )
 
