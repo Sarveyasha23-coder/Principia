@@ -108,6 +108,44 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+
+def coerce_datetime_series(values):
+    """Normalize timestamp-like values from persisted brain data into a pandas Series.
+
+    Handles empty data, None, mixed string / datetime inputs, and invalid values without
+    changing timezone-aware timestamps or local times.
+    """
+    if values is None:
+        return pd.Series([], dtype="datetime64[ns]")
+
+    if isinstance(values, pd.Series):
+        series = values
+    elif isinstance(values, pd.Index):
+        series = pd.Series(values)
+    elif isinstance(values, (list, tuple, np.ndarray)):
+        series = pd.Series(values)
+    else:
+        series = pd.Series([values])
+
+    parsed = pd.to_datetime(series, errors="coerce")
+    if isinstance(parsed, pd.DatetimeIndex):
+        parsed = pd.Series(parsed)
+
+    return parsed.dropna().reset_index(drop=True)
+
+
+def build_ingestion_timeline(raw_timestamps):
+    """Build a date-based ingestion timeline while tolerating invalid or missing data."""
+    timestamps = coerce_datetime_series(raw_timestamps)
+    if timestamps.empty:
+        return pd.DataFrame({"date": pd.Series([], dtype="datetime64[ns]"), "count": pd.Series([], dtype="int64")})
+
+    timeline = pd.DataFrame({"date": timestamps.dt.date, "count": 1}).dropna(subset=["date"])
+    timeline = timeline.groupby("date", as_index=False).size().rename(columns={"size": "count"})
+    timeline["date"] = pd.to_datetime(timeline["date"])
+    return timeline.sort_values("date").reset_index(drop=True)
+
+
 # ==========================================
 # 2. DATABASE MANAGEMENT
 # ==========================================
@@ -558,10 +596,12 @@ def main():
             
             # Timeline
             st.subheader("Ingestion Timeline")
-            timestamps = pd.to_datetime(brain.data["timestamps"])
-            timeline = pd.DataFrame({"date": timestamps.dt.date, "count": 1}).groupby("date").count()
-            fig2 = px.line(timeline, y="count", title="Documents Added Over Time")
-            st.plotly_chart(fig2, use_container_width=True)
+            timeline = build_ingestion_timeline(brain.data["timestamps"])
+            if timeline.empty:
+                st.info("No valid ingestion timestamps are available yet.")
+            else:
+                fig2 = px.line(timeline, x="date", y="count", title="Documents Added Over Time")
+                st.plotly_chart(fig2, use_container_width=True)
             
             # Tag cloud
             if brain.data["tags"]:
