@@ -146,7 +146,6 @@ def normalize_brain_data(data):
         timestamps.extend([None] * (target_len - len(timestamps)))
     if len(tags) < target_len:
         tags.extend([[] for _ in range(target_len - len(tags))])
-
     if len(texts) < target_len:
         texts.extend([""] * (target_len - len(texts)))
 
